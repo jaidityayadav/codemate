@@ -2,6 +2,17 @@
 
 A semantic search system using Milvus vector database and Ollama embeddings for intelligent document retrieval.
 
+## Architecture
+
+![Architecture Diagram](diag.png)
+
+The system follows a RAG (Retrieval-Augmented Generation) pattern with the following key components:
+
+- **Document Ingestion**: Text files are chunked and converted to embeddings using Ollama's nomic-embed-text model
+- **Vector Storage**: Milvus database stores and indexes the document embeddings for efficient similarity search
+- **Query Processing**: User queries are embedded and matched against stored vectors to find relevant content
+- **Multiple Interfaces**: Interactive agent, single search, and testing utilities for different use cases
+
 ## Quick Start Guide
 
 ### Prerequisites
