@@ -1,74 +1,68 @@
 import os
 import gc
-import torch
-from transformers import AutoTokenizer, AutoModel
-import numpy as np
+import requests
+import json
 from pymilvus import Collection, CollectionSchema, FieldSchema, DataType, utility
 from config import COLLECTION_NAME, EMBED_MODEL
 from utils.chunker import chunk_text
 
-BATCH_SIZE = 4  # Very small batch size to prevent memory issues
+BATCH_SIZE = 8  # Process multiple chunks at once
 
-class MemoryEfficientEmbedder:
-    def __init__(self, model_name):
-        print(f"🔄 Loading embedding model: {model_name}")
-        self.device = torch.device('cpu')  # Force CPU to avoid GPU memory issues
-        print(f"📱 Using device: {self.device}")
+class OllamaEmbedder:
+    def __init__(self, model_name="nomic-embed-text"):
+        self.model_name = model_name
+        self.base_url = "http://localhost:11434"
+        print(f"� Using Ollama model: {model_name}")
         
-        # Load model components
-        print("📥 Loading tokenizer...")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        
-        print("📥 Loading model...")
-        self.model = AutoModel.from_pretrained(model_name, torch_dtype=torch.float32)
-        self.model.to(self.device)
-        self.model.eval()
-        
-        print("✅ Model loaded successfully!")
-        
-    def encode_single(self, text):
-        """Encode a single text to prevent memory overload"""
-        with torch.no_grad():
-            # Tokenize with limited length
-            inputs = self.tokenizer(
-                text, 
-                padding=True, 
-                truncation=True, 
-                max_length=256,  # Reduced max length
-                return_tensors='pt'
-            ).to(self.device)
-            
-            # Get embeddings
-            outputs = self.model(**inputs)
-            
-            # Mean pooling
-            attention_mask = inputs['attention_mask']
-            token_embeddings = outputs.last_hidden_state
-            input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
-            embeddings = torch.sum(token_embeddings * input_mask_expanded, 1) / torch.clamp(input_mask_expanded.sum(1), min=1e-9)
-            
-            # Normalize
-            embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
-            
-            # Clear memory immediately
-            del inputs, outputs, token_embeddings, input_mask_expanded
-            
-            return embeddings.cpu().numpy()[0]
+        # Test connection
+        try:
+            response = requests.get(f"{self.base_url}/api/tags")
+            if response.status_code == 200:
+                print("✅ Connected to Ollama successfully!")
+            else:
+                raise Exception("Cannot connect to Ollama")
+        except Exception as e:
+            print(f"❌ Error connecting to Ollama: {e}")
+            print("Make sure Ollama is running: ollama serve")
+            raise
     
     def encode(self, texts):
-        """Encode texts one by one to prevent memory issues"""
+        """Encode texts using Ollama API"""
         embeddings = []
+        
         for i, text in enumerate(texts):
-            if i % 2 == 0:  # Progress every 2 items
-                print(f"    🔄 Processing {i+1}/{len(texts)}")
-            
-            embedding = self.encode_single(text)
-            embeddings.append(embedding)
-            
-            # Force garbage collection every item
-            gc.collect()
-            
-        return np.array(embeddings)
+            try:
+                # Prepare the request
+                payload = {
+                    "model": self.model_name,
+                    "prompt": text
+                }
+                
+                # Make request to Ollama
+                response = requests.post(
+                    f"{self.base_url}/api/embeddings",
+                    json=payload,
+                    timeout=30
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    embedding = result["embedding"]
+                    embeddings.append(embedding)
+                    
+                    if (i + 1) % 5 == 0:  # Progress every 5 items
+                        print(f"    🔄 Processed {i+1}/{len(texts)} embeddings")
+                else:
+                    print(f"❌ Error getting embedding for text {i+1}: {response.text}")
+                    # Use zero vector as fallback
+                    embeddings.append([0.0] * 768)  # Nomic-embed-text is 768 dimensions
+                    
+            except Exception as e:
+                print(f"❌ Error processing text {i+1}: {e}")
+                # Use zero vector as fallback
+                embeddings.append([0.0] * 768)
+        
+        return embeddings
 
 def create_collection():
     # Drop existing collection to avoid conflicts
@@ -78,7 +72,7 @@ def create_collection():
 
     fields = [
         FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
-        FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=384),
+        FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=768),  # Nomic-embed-text is 768 dimensions
         FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=1024)
     ]
     schema = CollectionSchema(fields, description="Research documents")
@@ -97,8 +91,8 @@ def create_collection():
 
 def ingest_docs():
     try:
-        print("🚀 Starting document ingestion...")
-        embedder = MemoryEfficientEmbedder(EMBED_MODEL)
+        print("🚀 Starting document ingestion with Ollama...")
+        embedder = OllamaEmbedder()
         collection = create_collection()
 
         data_dir = "data"
@@ -125,25 +119,24 @@ def ingest_docs():
                     print(f"⚠️ Skipping empty file: {fname}")
                     continue
 
-                chunks = chunk_text(raw_text, chunk_size=400, overlap=50)  # Smaller chunks
+                chunks = chunk_text(raw_text, chunk_size=400, overlap=50)
                 print(f"📝 Split into {len(chunks)} chunks")
 
-                # Process in very small batches
+                # Process in batches
                 for i in range(0, len(chunks), BATCH_SIZE):
                     try:
                         batch = chunks[i:i+BATCH_SIZE]
                         # Truncate chunks for VARCHAR limit
-                        batch = [chunk[:800] for chunk in batch]  # Reduced limit
+                        batch = [chunk[:900] for chunk in batch]  # Leave some buffer
                         
                         print(f"  🔄 Processing batch {i//BATCH_SIZE+1}/{(len(chunks)-1)//BATCH_SIZE+1}")
                         embeddings = embedder.encode(batch)
-                        embeddings_list = embeddings.tolist()
                         
-                        collection.insert([embeddings_list, batch])
+                        collection.insert([embeddings, batch])
                         
                         print(f"  ✅ Inserted batch {i//BATCH_SIZE+1}")
                         
-                        # Aggressive garbage collection
+                        # Light garbage collection
                         gc.collect()
                         
                     except Exception as e:
@@ -156,10 +149,6 @@ def ingest_docs():
 
         collection.flush()
         print("\n🎉 All documents ingested successfully!")
-        
-        # Final memory cleanup
-        del embedder
-        gc.collect()
         
     except Exception as e:
         print(f"❌ Fatal error during ingestion: {e}")
