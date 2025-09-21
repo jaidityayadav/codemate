@@ -1,6 +1,25 @@
-pymilvus
-sentence-transformers
-fastapi
-uvicorn
-reportlab
-pandas
+# Core vector database
+pymilvus>=2.6.0
+
+# Data processing
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Text processing and embeddings
+sentence-transformers>=2.2.2
+
+# HTTP requests (for Ollama API)
+requests>=2.31.0
+
+# File handling
+python-docx>=1.1.0
+pypdf2>=3.0.0
+
+# Output generation
+reportlab>=4.0.0
+markdown>=3.4.0
+
+# Utilities
+python-dotenv>=1.0.0
+tqdm>=4.65.0
+psutil>=5.9.0
